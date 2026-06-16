@@ -1,135 +1,98 @@
-# RAI Tracker — ML Scientist Technical Assessment
+# Responsible AI Monitoring — UK Government AI Triage System
 
-A production-quality Python monitoring framework for a UK government AI triage system,
-built as the technical assessment for the Machine Learning Scientist role at
-[RAI Tracker (RAIT)](https://www.raitracker.com).
+A Python monitoring package I built to track fairness, robustness, and transparency
+for an AI system that triages citizen service requests into priority categories
+(urgent / standard / low).
 
-## The Scenario
-
-A UK government department deploys an AI system that triages ~2,000 incoming citizen
-requests per day into priority categories: `urgent`, `standard`, `low`. The system has
-access to inference logs (input metadata, predicted priority, confidence score, timestamp)
-and a separate demographic dataset joinable by request ID.
-
-**Task:** Design and implement a monitoring approach covering fairness, robustness, and
-transparency — with metrics, computation frequency, alert thresholds, and limitations.
+The system processes ~2,000 requests a day and has access to inference logs plus
+a separate demographic dataset joined by request ID. The goal was to detect bias,
+input drift, and data quality issues before they become governance problems.
 
 ---
 
-## Project Structure
+## What's in here
 
 ```
-├── technical_note.md          # Written answer: metrics, frequency, thresholds, limitations
-│                              # Includes regulatory mapping (EU AI Act, NIST AI RMF, UK AI Playbook)
-│                              # and academic citations for every metric choice
-├── requirements.txt
-└── src/
-    ├── data_loader.py         # Synthetic telemetry generation (inference logs + demographics)
-    ├── monitor.py             # Main pipeline: join → compute → alert → JSON report
-    └── metrics/
-        ├── fairness.py        # Statistical Parity, Disparate Impact, Confidence Disparity
-        │                      # with bootstrap 95% CIs and minimum sample size guards
-        ├── robustness.py      # PSI, KS test, Prediction Drift, Confidence Trend
-        └── transparency.py    # Demographic Missingness Rate, Feature Completeness
+├── technical_note.md    # design rationale, metric choices, thresholds, limitations
+├── src/
+│   ├── data_loader.py   # generates synthetic telemetry (inference logs + demographics)
+│   ├── monitor.py       # runs the full pipeline and outputs a JSON report
+│   └── metrics/
+│       ├── fairness.py       # SPD, Disparate Impact, Confidence Disparity
+│       ├── robustness.py     # PSI, KS test, prediction drift, confidence trend
+│       └── transparency.py  # missingness rate, feature completeness
+└── tests/
+    └── test_metrics.py  # 19 unit tests
 ```
 
 ---
 
-## Metrics Implemented
-
-### Fairness (per protected attribute: gender, location)
-| Metric | Method | Reference |
-|---|---|---|
-| Statistical Parity Difference | Difference in urgent classification rates vs reference group | Hardt et al. (2016) |
-| Disparate Impact | Rate ratio; four-fifths rule threshold | EEOC (1978) |
-| Confidence Calibration Disparity | Median confidence per group with bootstrap 95% CI | Guo et al. (2017) |
-
-Reference group = largest group by volume (stable across daily windows).
-Groups with n < 50 are flagged as statistically unreliable rather than silently computed.
-
-### Robustness
-| Metric | Method |
-|---|---|
-| Population Stability Index (PSI) | Percentile-binned baseline; PSI < 0.1 stable, > 0.2 major shift |
-| KS Test | Two-sample Kolmogorov–Smirnov for shape changes in input features |
-| Prediction Distribution Shift | Absolute change in class proportions vs baseline |
-| Confidence Score Trend | p5 / p50 / p95 percentiles of daily confidence scores |
-
-### Transparency
-| Metric | What it detects |
-|---|---|
-| Demographic Matching Rate | % of requests where demographic join succeeds |
-| Feature Completeness | % of input metadata fields with valid values |
-
----
-
-## Alert Thresholds
-
-Two-tier system (Warning / Critical) to avoid alert fatigue:
-
-| Metric | Warning | Critical |
-|---|---|---|
-| Disparate Impact | Outside [0.85, 1.15] | Outside [0.8, 1.25] |
-| Statistical Parity Diff | > 0.05 | > 0.10 |
-| Confidence Disparity | Group median < global − 5% | Group median < global − 10% |
-| PSI | > 0.10 | > 0.20 |
-| Prediction Drift | > 5% | > 10% |
-| Demographic Missingness | > 5% | > 15% |
-
----
-
-## Regulatory Mapping
-
-Each metric traces to specific requirements in:
-- **EU AI Act** — Articles 9, 10, 13, 15
-- **NIST AI RMF** — Measure 2.5, Measure 2.6, Map 5.1, Manage 4.1
-- **UK AI Playbook** — Principles 1, 5, 6, 9
-
-See [`technical_note.md`](technical_note.md) for the full mapping table.
-
----
-
-## Setup
+## Running it
 
 ```bash
 pip install -r requirements.txt
-```
 
-**Run the monitoring pipeline:**
-```bash
+# run the monitoring pipeline — outputs a structured JSON report
 cd src
 python monitor.py
-```
 
-Outputs a structured JSON report with all metric values and triggered alerts.
-
-**Run tests (19 unit tests):**
-```bash
+# run tests
 pytest tests/ -v
 ```
 
 ---
 
-## Design Decisions
+## Metrics
 
-- **Daily batch over real-time:** ~83 requests/hour is too small for stable fairness metrics.
-  Daily n=2,000 gives sufficient statistical power for KS and PSI tests.
-- **Rolling 7-day window for small subgroups:** groups with n < 50/day accumulate samples
-  before metrics are computed.
-- **Bootstrap CIs on all fairness metrics:** point estimates without uncertainty bounds are
-  not actionable. 500-resample bootstrap with fixed seed (42) for reproducibility.
-- **Structured JSON logging:** required for CloudWatch / log aggregation in AWS Lambda context.
-- **Thresholds externalised to config dict:** tunable without touching computation logic.
-- **Fairness–calibration impossibility acknowledged:** Chouldechova (2017) proves statistical
-  parity and equalised odds cannot both hold when base rates differ. Governance documentation
-  must record which criterion is prioritised.
+**Fairness** — evaluated separately for gender and location attributes.
+
+- Statistical Parity Difference and Disparate Impact (four-fifths rule threshold from EEOC 1978)
+- Reference group is fixed to the largest group by volume, not the highest-rate group —
+  using the max-rate group as reference shifts daily and makes trend comparison meaningless
+- Bootstrap 95% confidence intervals on all group-level rates (500 resamples)
+- Groups with n < 50 get flagged as unreliable rather than computed — small-sample DI
+  values without CIs aren't actionable
+
+**Robustness** — two complementary drift methods because they catch different things.
+
+- PSI detects mass shifts in the input distribution (stable/moderate/major thresholds
+  from Siddiqi 2006 credit scoring literature)
+- KS test catches shape changes that PSI can miss
+- Prediction distribution shift flags sudden changes in urgent/standard/low proportions
+- Confidence percentile trend (p5/p50/p95) as an early warning for model degradation
+
+**Transparency** — data quality checks that validity of the above metrics depends on.
+
+- Demographic matching rate: if 30% of records don't join, the fairness numbers are
+  computed on a biased subset and shouldn't be trusted
+- Feature completeness per input field
+
+Alert thresholds are two-tier (warning / critical) and defined in a single config dict
+in `monitor.py` so they can be tuned without touching computation logic.
+
+---
+
+## Design notes
+
+The frequency decision came down to sample size. At 2,000 requests/day, running metrics
+hourly gives ~83 requests per window — not enough for stable fairness or drift tests.
+Daily batch gives sufficient power. For small demographic subgroups (under 50/day),
+I use a rolling 7-day window instead.
+
+One thing worth flagging explicitly: fairness metrics based on demographic parity and
+equalised odds can't both be satisfied simultaneously when base rates differ across groups
+(Chouldechova 2017). That's not a bug in the metrics — it's a fundamental constraint that
+governance documentation needs to record up front.
+
+Regulatory mapping for each metric (EU AI Act, NIST AI RMF, UK AI Playbook) is in
+`technical_note.md`.
 
 ---
 
 ## References
 
-- Hardt, M., Price, E., & Srebro, N. (2016). Equality of opportunity in supervised learning. *NeurIPS 29*.
-- Chouldechova, A. (2017). Fair prediction with disparate impact. *Big Data, 5*(2), 153–163.
-- EEOC (1978). Uniform Guidelines on Employee Selection Procedures. 29 CFR Part 1607.
-- Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). On calibration of modern neural networks. *ICML*.
-- Siddiqi, N. (2006). *Credit Risk Scorecards*. John Wiley & Sons.
+- Hardt et al. (2016). Equality of opportunity in supervised learning. *NeurIPS 29*
+- Chouldechova (2017). Fair prediction with disparate impact. *Big Data 5(2)*
+- EEOC (1978). Uniform Guidelines on Employee Selection Procedures. 29 CFR 1607
+- Guo et al. (2017). On calibration of modern neural networks. *ICML*
+- Siddiqi (2006). *Credit Risk Scorecards*. Wiley
